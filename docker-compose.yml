@@ -1,0 +1,11 @@
+name: tse-movil
+
+# docker compose up --build apk  ->  deja el APK en build-output/cargauy-chofer-debug.apk
+services:
+  apk:
+    build:
+      context: .
+      args:
+        BASE_URL: ${CARGAUY_BASE_URL:-https://env-6537388.web.elasticloud.uy/frontofficeciudadanos-web}
+    volumes:
+      - ./build-output:/build-output
