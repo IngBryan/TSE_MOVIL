@@ -37,7 +37,7 @@ class ViajeDaoFalso : ViajeDao {
     override suspend fun marcarAviso(id: String, aviso: Boolean) {
         datos.value = datos.value.map { if (it.id == id) it.copy(avisoModificada = aviso) else it }
     }
-        override suspend fun borrar(ids: List<String>) {
+    override suspend fun borrar(ids: List<String>) {
         datos.value = datos.value.filter { it.id !in ids }
     }
     override suspend fun borrarTodo() {
@@ -70,15 +70,17 @@ class EventoDaoFalso : EventoDao {
     }
 }
 
-// Simula el central: aplica las mismas transiciones e idempotencia por idEvento.
+// Respuestas preparadas por cada prueba: no vuelve a implementar las reglas del central.
 class CentralFalso : ApiMovil {
     val guias = linkedMapOf<String, ViajeDto>()
-    val procesados = mutableMapOf<String, ResultadoEnvio>()
+    private val respuestas = ArrayDeque<ResultadoEnvio>()
+
+    fun responder(vararg resultados: ResultadoEnvio) {
+        respuestas.addAll(resultados.toList())
+    }
     val recibidos = mutableListOf<EventoDto>()
     var sinRed = false
     var tokenValido = "token-ok"
-    // Simula que la respuesta se pierde despues de aplicar el evento (el movil no se entera)
-    var perderRespuestaUnaVez = false
 
     // Ultimo canje recibido: code, codeVerifier, nonce, redirectUri
     var ultimoCanje: List<String>? = null
@@ -94,57 +96,15 @@ class CentralFalso : ApiMovil {
     override suspend fun viajes(token: String): List<ViajeDto> {
         if (sinRed) throw SinConexionException("sin red")
         if (token != tokenValido) throw uy.carga.movil.datos.remoto.SesionVencidaException()
-        return guias.values.filter { it.estado == "ASIGNADA" || it.estado == "EN_CURSO" }
+        return guias.values.toList()
     }
 
     override suspend fun enviarEvento(token: String, evento: EventoDto): ResultadoEnvio {
         if (sinRed) return ResultadoEnvio.Transitorio("sin red")
         if (token != tokenValido) return ResultadoEnvio.SesionVencida
         recibidos += evento
-        procesados[evento.idEvento]?.let {
-            return when (it) {
-                is ResultadoEnvio.Aceptado -> it.copy(duplicado = true)
-                else -> it
-            }
-        }
-        val g = guias[evento.idGuia] ?: return ResultadoEnvio.Rechazado("no_encontrada", "No existe")
-        if (g.estado == "REASIGNADA") {
-            return ResultadoEnvio.Conflicto("GUIA_REASIGNADA", "Reasignada").also { procesados[evento.idEvento] = it }
-        }
-        val modificada = evento.versionGuia != null && evento.versionGuia != g.version
-        // Misma politica que ViajesChoferService.decidir: (nuevo estado, sin efecto, codigo de conflicto)
-        val (nuevo, sinEfecto, conflicto) = when (evento.tipo) {
-            "INICIO" -> when (g.estado) {
-                "ASIGNADA" -> Triple("EN_CURSO", false, null)
-                "EN_CURSO" -> Triple(g.estado, true, null)
-                else -> Triple(g.estado, false, "VIAJE_FINALIZADO")
-            }
-            "FIN" -> when (g.estado) {
-                "EN_CURSO" -> Triple("FINALIZADA", false, null)
-                "FINALIZADA" -> Triple(g.estado, true, null)
-                else -> Triple(g.estado, false, "VIAJE_NO_INICIADO")
-            }
-            else -> when (g.estado) {
-                "EN_CURSO" -> Triple(g.estado, false, null)
-                "ASIGNADA" -> Triple(g.estado, false, "VIAJE_NO_INICIADO")
-                else -> Triple(g.estado, false, "VIAJE_FINALIZADO")
-            }
-        }
-        if (conflicto != null) {
-            return ResultadoEnvio.Conflicto(conflicto, "No aplica", g).also { procesados[evento.idEvento] = it }
-        }
-        val version = (g.version ?: 0) + if (nuevo != g.estado) 1 else 0
-        val actual = g.copy(estado = nuevo, version = version)
-        guias[g.id] = actual
-        val r = ResultadoEnvio.Aceptado(
-            nuevo, version, false, sinEfecto, if (sinEfecto) "VIAJE_YA_INICIADO" else null, null, modificada, actual,
-        )
-        procesados[evento.idEvento] = r
-        if (perderRespuestaUnaVez) {
-            perderRespuestaUnaVez = false
-            return ResultadoEnvio.Transitorio("timeout")
-        }
-        return r
+        check(respuestas.isNotEmpty()) { "Falta preparar la respuesta de ${evento.tipo}" }
+        return respuestas.removeFirst()
     }
 }
 
