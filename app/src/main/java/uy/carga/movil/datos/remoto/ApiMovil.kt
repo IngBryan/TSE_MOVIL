@@ -9,7 +9,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import uy.carga.movil.datos.LogMovil
 import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 // API REST de la app en el componente central (WildFly, frontofficeciudadanos-web):
@@ -134,6 +136,7 @@ class ApiMovilHttp(
     ): TokenDto = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url("$baseUrl/api/movil/auth/token")
+            .header("X-Correlation-Id", UUID.randomUUID().toString())
             .post(json.encodeToString(CanjeDto(code, codeVerifier, nonce, redirectUri)).toRequestBody(tipoJson))
             .build()
         ejecutar(req) { codigo, cuerpo ->
@@ -151,6 +154,7 @@ class ApiMovilHttp(
         val req = Request.Builder()
             .url("$baseUrl/api/movil/viajes")
             .header("Authorization", "Bearer $token")
+            .header("X-Correlation-Id", UUID.randomUUID().toString())
             .get()
             .build()
         ejecutar(req) { codigo, cuerpo ->
@@ -198,12 +202,26 @@ class ApiMovilHttp(
     private fun conflicto(cuerpo: String): ResultadoEventoDto? =
         runCatching { json.decodeFromString<ResultadoEventoDto>(cuerpo) }.getOrNull()?.takeIf { it.resultado == "CONFLICTO" }
 
+    // Deja el log de cada llamada. La ruta va sin la query: el token nunca aparece en el log.
     private fun <T> ejecutar(req: Request, procesar: (Int, String) -> T): T {
+        val correlationId = req.header("X-Correlation-Id")
+        val datos = mapOf("metodo" to req.method, "ruta" to req.url.encodedPath)
+        val inicio = System.nanoTime()
         val (codigo, cuerpo) = try {
             cliente.newCall(req).execute().use { it.code to (it.body?.string() ?: "") }
         } catch (e: IOException) {
+            LogMovil.registrar(
+                "http.request", LogMovil.Nivel.WARN, correlationId,
+                roundtripSeconds = segundosDesde(inicio), error = e.toString(), datos = datos,
+            )
             throw SinConexionException("No se pudo conectar con el servidor", e)
         }
+        LogMovil.registrar(
+            "http.request", if (codigo >= 500) LogMovil.Nivel.ERROR else LogMovil.Nivel.INFO, correlationId,
+            responseCode = codigo, roundtripSeconds = segundosDesde(inicio), datos = datos,
+        )
         return procesar(codigo, cuerpo)
     }
+
+    private fun segundosDesde(inicioNanos: Long) = (System.nanoTime() - inicioNanos) / 1_000_000_000.0
 }

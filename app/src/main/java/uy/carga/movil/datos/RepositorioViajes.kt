@@ -140,6 +140,10 @@ class RepositorioViajes(
                 estado = EstadoEvento.PENDIENTE.name,
             ),
         )
+        LogMovil.registrar(
+            "evento.registrado", correlationId = id, usuario = sesion.sesion.value?.cedula,
+            datos = mapOf("guia" to idGuia, "tipo" to tipo.name, "foto" to (ruta != null)),
+        )
         programador.programar(urgente = false)
         return id
     }
@@ -163,7 +167,9 @@ class RepositorioViajes(
                 // la version que el telefono conoce ahora (actualizada por los envios anteriores)
                 versionGuia = viajes.buscar(evento.idGuia)?.version,
             )
-            when (val r = api.enviarEvento(token, dto)) {
+            val r = api.enviarEvento(token, dto)
+            logEnvio(evento, r)
+            when (r) {
                 is ResultadoEnvio.Aceptado -> {
                     val nota = if (r.sinEfecto) ReglasViaje.mensajeSinEfecto(r.codigo, r.detalle) else null
                     eventos.marcar(evento.idEvento, EstadoEvento.SINCRONIZADO.name, nota, null)
@@ -196,6 +202,23 @@ class RepositorioViajes(
                 }
             }
         }
+    }
+
+    // correlationId = idEvento, el mismo en cada reintento: en el central se ve como un unico evento
+    private fun logEnvio(evento: EventoEntity, r: ResultadoEnvio) {
+        val (resultado, nivel) = when (r) {
+            is ResultadoEnvio.Aceptado -> (if (r.duplicado) "duplicado" else "aceptado") to LogMovil.Nivel.INFO
+            is ResultadoEnvio.Conflicto -> "conflicto" to LogMovil.Nivel.WARN
+            is ResultadoEnvio.Rechazado -> "rechazado" to LogMovil.Nivel.WARN
+            ResultadoEnvio.SesionVencida -> "sesion_vencida" to LogMovil.Nivel.WARN
+            is ResultadoEnvio.Transitorio -> "reintentar" to LogMovil.Nivel.WARN
+        }
+        LogMovil.registrar(
+            "evento.sincronizacion", nivel, evento.idEvento, sesion.sesion.value?.cedula,
+            datos = mapOf(
+                "guia" to evento.idGuia, "tipo" to evento.tipo, "resultado" to resultado, "intentos" to evento.intentos,
+            ),
+        )
     }
 
     // El central devolvio la guia actual (viene cuando la version que mando el telefono no coincidia,
